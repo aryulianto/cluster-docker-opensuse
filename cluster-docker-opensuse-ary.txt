@@ -1,0 +1,51 @@
+##node manager
+sed -i '/DOCKER_OPTS=/s/^/#/g' /etc/sysconfig/docker
+echo 'DOCKER_OPTS="-H tcp://0.0.0.0:2375 -H unix:///var/run/docker.sock --cluster-store=consul://10.2.2.99:8500 --cluster-advertise=10.2.2.99:2375"' >> /etc/sysconfig/docker
+
+##node1
+sed -i '/DOCKER_OPTS=/s/^/#/g' /etc/sysconfig/docker
+echo 'DOCKER_OPTS="-H tcp://0.0.0.0:2375 -H unix:///var/run/docker.sock --cluster-store=consul://10.2.2.99:8500 --cluster-advertise=10.2.2.100:2375"' >> /etc/sysconfig/docker
+
+##node2
+sed -i '/DOCKER_OPTS=/s/^/#/g' /etc/sysconfig/docker
+echo 'DOCKER_OPTS="-H tcp://0.0.0.0:2375 -H unix:///var/run/docker.sock --cluster-store=consul://10.2.2.99:8500 --cluster-advertise=10.2.2.200:2375"' >> /etc/sysconfig/docker
+
+systemctl daemon-reload
+systemctl restart docker.service
+systemctl enable docker.service
+systemctl status docker.service
+
+##running consul discovery backend & swarm manager 
+docker run -d --restart=always --name=consul -h consul -p 8500:8500 progrium/consul -server -bootstrap
+docker run -d --restart=always --name swarm-manager -h swarm-manager -p 4000:4000 swarm manage -H :4000 --replication --advertise 10.2.2.99:4000 consul://10.2.2.99:8500
+
+##join node1
+docker run -d --restart=always --name=swarm-node1 -h swarm-node1 swarm join --advertise=10.2.2.100:2375 consul://10.2.2.99:8500
+
+##join node2
+docker run -d --restart=always --name=swarm-node2 -h swarm-node2 swarm join --advertise=10.2.2.200:2375 consul://10.2.2.99:8500
+
+##verify
+docker -H :4000 info
+
+##overlay Network di node manager
+docker -H :4000 network create --driver overlay --subnet=172.31.0.0/16 overlay
+docker -H :4000 network ls
+docker -H :4000 network inspect overlay
+
+##create docker guest from node manager
+docker -H :4000 run -d --name cirros1 -h cirros1 --net=overlay cirros init
+docker -H :4000 run -d --name cirros2 -h cirros2 --net=overlay cirros init
+docker -H :4000 ps -a
+
+##inspect ip docker guest
+docker -H :4000 inspect cirros1 | grep "172.31"
+docker -H :4000 inspect cirros2 | grep "172.31"
+
+##test ping from guest
+docker -H :4000 exec -it cirros1 /bin/sh
+ping -c 3 172.31.x.x
+
+##install rethinkdb and shipyard
+docker run -ti -d --restart=always -h shipyard-rethinkdb --name shipyard-rethinkdb rethinkdb
+docker run -ti -d --restart=always --name shipyard-controller -h shipyard-controller --link shipyard-rethinkdb:rethinkdb --link swarm-manager:swarm -p 8080:8080 shipyard/shipyard:latest server -d tcp://swarm:4000
